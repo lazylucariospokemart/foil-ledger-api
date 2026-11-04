@@ -1,0 +1,23 @@
+name = "foil-ledger-api"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# KV namespace for the referral + call ledger.
+# After `npx wrangler kv namespace create LEDGER`, paste the id it prints below.
+[[kv_namespaces]]
+binding = "LEDGER"
+id = "PASTE_KV_ID_HERE"
+
+[vars]
+# ---- TESTNET (default) ----
+NETWORK = "eip155:84532"                       # Base Sepolia
+FACILITATOR_URL = "https://x402.org/facilitator"
+REFERRAL_PCT = "10"
+# PAY_TO is set as a secret:  npx wrangler secret put PAY_TO   (paste your PUBLIC 0x address)
+
+# ---- MAINNET: change the two lines above to ----
+# NETWORK = "eip155:8453"                      # Base mainnet
+# FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
+# and add secrets:  npx wrangler secret put CDP_API_KEY_ID
+#                   npx wrangler secret put CDP_API_KEY_SECRET

@@ -1,0 +1,33 @@
+{
+  "name": "foil-ledger-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --import tsx test/client.ts",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@coinbase/x402": "^2.1.0",
+    "@x402/core": "^2.29.0",
+    "@x402/evm": "^2.29.0",
+    "@x402/extensions": "^2.29.0",
+    "@x402/hono": "^2.29.0",
+    "hono": "^4.13.16"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "@types/node": "^26.6.6",
+    "@x402/fetch": "^2.29.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "viem": "^2.57.16",
+    "wrangler": "^4.157.0"
+  }
+}
