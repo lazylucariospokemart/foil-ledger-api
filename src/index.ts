@@ -93,6 +93,7 @@ app.get("/", (c) => c.json({
     "GET /v1/movers?n=10":  { price: PRICES.movers, desc: "Biggest 7-day movers, up and down" },
     "GET /v1/sample":       { price: "free",        desc: "Three real cards so you can see the response shape" },
     "GET /v1/health":       { price: "free",        desc: "Freshness + card count" },
+    "GET /v1/stats":        { price: "free",        desc: "Calls and USDC earned today / last 7 days (no addresses)" },
     "GET /v1/referrals/:address": { price: "free",  desc: "Referral earnings for a wallet" },
   },
   referrals: `Add ?ref=0xYourWallet to any paid call. You earn ${c.env.REFERRAL_PCT ?? "10"}% of every call you bring, paid out weekly in USDC. One level, sales only.`,
@@ -112,6 +113,21 @@ app.get("/v1/sample", async (c) => {
   const sorted = [...cards].sort((a, b) => (b.chg7 as number) - (a.chg7 as number));
   const sample = [sorted[0], sorted[Math.floor(sorted.length / 2)], sorted[sorted.length - 1]].filter(Boolean);
   return c.json({ note: "Free sample. Full data is pay-per-call; see / for prices.", count: cards.length, cards: sample.map(pub) });
+});
+
+// Free stats for the factory Foreman: calls + USDC earned, no addresses
+app.get("/v1/stats", async (c) => {
+  const chi = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  const days: string[] = [];
+  for (let i = 0; i < 7; i++) { const d = new Date(chi); d.setDate(chi.getDate() - i); days.push(day(d)); }
+  const rows = await Promise.all(days.map(async (k) => JSON.parse((await c.env.LEDGER.get(`day:${k}`)) ?? "null")));
+  const today = rows[0] ?? { calls: 0, usd: 0, byRoute: {} };
+  const last7 = rows.reduce((a, r) => r ? { calls: a.calls + r.calls, usd: +(a.usd + r.usd).toFixed(6) } : a, { calls: 0, usd: 0 });
+  let owed = 0, referrers = 0;
+  const list = await c.env.LEDGER.list({ prefix: "ref:" });
+  for (const k of list.keys) { const r = JSON.parse((await c.env.LEDGER.get(k.name)) ?? "{}"); referrers++; owed += (r.owedUsd ?? 0) - (r.paidUsd ?? 0); }
+  return c.json({ network: c.env.NETWORK ?? "eip155:84532", today: { date: days[0], calls: today.calls, usd: today.usd, byRoute: today.byRoute }, last7, referrers, referralOwedUsd: +owed.toFixed(6) });
 });
 
 app.get("/v1/referrals/:address", async (c) => {
