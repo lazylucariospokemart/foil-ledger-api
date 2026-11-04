@@ -10,14 +10,13 @@ binding = "LEDGER"
 id = "622d160e79d84085a30dbe57e9bb0018"
 
 [vars]
-# ---- TESTNET (default) ----
-NETWORK = "eip155:84532"                       # Base Sepolia
-FACILITATOR_URL = "https://x402.org/facilitator"
+# ---- MAINNET (live since 2026-11-04) ----
+NETWORK = "eip155:8453"                        # Base mainnet
+FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
 REFERRAL_PCT = "10"
 # PAY_TO is set as a secret:  npx wrangler secret put PAY_TO   (paste your PUBLIC 0x address)
 
-# ---- MAINNET: change the two lines above to ----
-# NETWORK = "eip155:8453"                      # Base mainnet
-# FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
-# and add secrets:  npx wrangler secret put CDP_API_KEY_ID
-#                   npx wrangler secret put CDP_API_KEY_SECRET
+# Secrets set in the Cloudflare dashboard: PAY_TO, CDP_API_KEY_ID, CDP_API_KEY_SECRET
+# ---- TESTNET: change the two lines above back to ----
+# NETWORK = "eip155:84532"                     # Base Sepolia
+# FACILITATOR_URL = "https://x402.org/facilitator"
