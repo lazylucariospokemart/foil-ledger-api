@@ -84,13 +84,14 @@ app.use("*", cors());
 // Free: landing + docs for humans and agents
 app.get("/", (c) => c.json({
   name: "Foil Ledger API",
-  what: "Pokémon TCG market prices (TCGplayer-based, condition-aware) from a working card shop's live inventory. Pay per call with USDC via x402.",
+  what: "Condition-aware Pokémon TCG market prices (TCGplayer-based, refreshed daily) for the cards a working card shop actually tracks and sells. Not the whole market: the live shelf of one seller. Pay per call with USDC via x402.",
   network: c.env.NETWORK ?? "eip155:84532",
   endpoints: {
     "GET /v1/cards":        { price: PRICES.cards,  desc: "All tracked cards with current market price and 7-day change" },
     "GET /v1/card/:id":     { price: PRICES.card,   desc: "One card by id" },
     "GET /v1/search?q=":    { price: PRICES.search, desc: "Search by card name / set" },
     "GET /v1/movers?n=10":  { price: PRICES.movers, desc: "Biggest 7-day movers, up and down" },
+    "GET /v1/sample":       { price: "free",        desc: "Three real cards so you can see the response shape" },
     "GET /v1/health":       { price: "free",        desc: "Freshness + card count" },
     "GET /v1/referrals/:address": { price: "free",  desc: "Referral earnings for a wallet" },
   },
@@ -103,6 +104,14 @@ app.get("/v1/health", async (c) => {
   const cards = await loadCards(c.env);
   const newest = cards.map((x) => x.priceAt ?? "").sort().pop();
   return c.json({ ok: true, cards: cards.length, pricesAsOf: newest, network: c.env.NETWORK ?? "eip155:84532" });
+});
+
+// Free sample: 3 real cards so buyers can see the shape before paying
+app.get("/v1/sample", async (c) => {
+  const cards = (await loadCards(c.env)).filter((x) => typeof x.chg7 === "number" && x.price >= 1);
+  const sorted = [...cards].sort((a, b) => (b.chg7 as number) - (a.chg7 as number));
+  const sample = [sorted[0], sorted[Math.floor(sorted.length / 2)], sorted[sorted.length - 1]].filter(Boolean);
+  return c.json({ note: "Free sample. Full data is pay-per-call; see / for prices.", count: cards.length, cards: sample.map(pub) });
 });
 
 app.get("/v1/referrals/:address", async (c) => {
