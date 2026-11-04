@@ -70,6 +70,41 @@ const res = await payFetch("https://foil-ledger-api.lazylucariospokemart28.worke
 console.log(await res.json());
 ```
 
+## Use it as MCP tools (for agents)
+
+The same data is exposed as an MCP server at **`/mcp`** (streamable HTTP, stateless).
+Add it to Claude, Cursor, or any MCP-capable agent and the tools appear in its tool list;
+each paid call is settled with x402 (USDC on Base) automatically by an x402-aware client.
+
+```
+https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp
+```
+
+| Tool | Price | Returns |
+|---|---|---|
+| `health` | free | card count, freshness, network |
+| `get_sample` | free | 3 real cards (response shape) |
+| `get_card_price` `{id}` | $0.002 | one card |
+| `search_cards` `{q}` | $0.005 | name/set search |
+| `get_movers` `{n}` | $0.01 | biggest 7-day movers |
+| `get_all_cards` | $0.005 | every tracked card |
+
+Client side with the official SDK:
+
+```ts
+import { createx402MCPClient } from "@x402/mcp";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+const client = createx402MCPClient({
+  name: "my-agent", version: "1.0.0",
+  schemes: [{ network: "eip155:8453", client: new ExactEvmScheme(account) }],
+  autoPayment: true,
+});
+await client.connect(new StreamableHTTPClientTransport(new URL("https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp")));
+const res = await client.callTool("get_movers", { n: 5 });
+```
+
 ## Referrals: 10% of every call you send, forever
 
 Append `?ref=0xYourWallet` to any paid call. Every settled payment with your address on it credits you **10%**, paid weekly in USDC. One level. Sales only, never signups.

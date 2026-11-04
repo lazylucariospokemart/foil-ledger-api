@@ -15,6 +15,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
+import { handleMcp, MCP_PRICES } from "./mcp";
 
 type Env = {
   LEDGER: KVNamespace;          // referral + call ledger
@@ -79,7 +80,10 @@ const pub = (c: Card) => c; // already stripped above
 
 // ---------- app ----------
 const app = new Hono<{ Bindings: Env }>();
-app.use("*", cors({ origin: "*", exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE"] }));
+app.use("*", cors({ origin: "*", exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE", "Mcp-Session-Id"], allowHeaders: ["Content-Type", "Accept", "Mcp-Session-Id", "Mcp-Protocol-Version", "PAYMENT-SIGNATURE", "X-PAYMENT"] }));
+
+// MCP: the same data as paid tools for agents (Claude, Cursor, ...). Stateless streamable-HTTP.
+app.all("/mcp", (c) => handleMcp(c.req.raw, c.env));
 
 // Free: landing + docs for humans and agents
 app.get("/", (c) => c.json({
@@ -96,6 +100,7 @@ app.get("/", (c) => c.json({
     "GET /v1/stats":        { price: "free",        desc: "Calls and USDC earned today / last 7 days (no addresses)" },
     "GET /v1/referrals/:address": { price: "free",  desc: "Referral earnings for a wallet" },
   },
+  mcp: { url: new URL("/mcp", c.req.url).toString(), transport: "streamable-http", tools: { ...MCP_PRICES, get_sample: "free", health: "free" }, note: "Same data as the REST routes, as MCP tools with x402 payment per call" },
   referrals: `Add ?ref=0xYourWallet to any paid call. You earn ${c.env.REFERRAL_PCT ?? "10"}% of every call you bring, paid out weekly in USDC. One level, sales only.`,
   docs: "https://docs.x402.org",
   owner: "Lazy Lucario — lazylucariospokemart.github.io/lazy-lucario-vault",
