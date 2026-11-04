@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 # After `npx wrangler kv namespace create LEDGER`, paste the id it prints below.
 [[kv_namespaces]]
 binding = "LEDGER"
-id = "PASTE_KV_ID_HERE"
+id = "622d160e79d84085a30dbe57e9bb0018"
 
 [vars]
 # ---- TESTNET (default) ----
