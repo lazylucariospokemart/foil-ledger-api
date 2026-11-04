@@ -79,7 +79,7 @@ const pub = (c: Card) => c; // already stripped above
 
 // ---------- app ----------
 const app = new Hono<{ Bindings: Env }>();
-app.use("*", cors());
+app.use("*", cors({ origin: "*", exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "X-PAYMENT-RESPONSE"] }));
 
 // Free: landing + docs for humans and agents
 app.get("/", (c) => c.json({
@@ -179,30 +179,57 @@ app.use("*", async (c, next) => {
 
   const payTo = env.PAY_TO;
   const accept = (price: string) => [{ scheme: "exact" as const, price, network, payTo }];
+  // Bazaar service metadata: shown on every listing in the x402 discovery index
+  const service = {
+    serviceName: "Foil Ledger API",
+    tags: ["pokemon", "tcg", "prices", "collectibles", "market-data"],
+    iconUrl: "https://lazylucariospokemart.github.io/lazy-lucario-vault/favicon.svg",
+  };
+  // A real card from the shelf (shape only; live values come from the daily price file)
+  const exampleCard = {
+    id: "122", name: "Pichu - 082/128", set: "Base Expansion Pack", number: "082/128", cond: "NM",
+    printing: "1st Edition - Japanese", rarity: "Rare", language: "Japanese", price: 90, chg7: 33.33,
+    priceAt: "2026-11-03T14:35:10Z", kind: "single",
+  };
   const routes: RoutesConfig = {
     "GET /v1/cards": {
       accepts: accept(PRICES.cards), mimeType: "application/json",
       description: "All tracked Pokémon TCG cards from a live card shop inventory: name, set, number, condition, printing, TCGplayer-based market price, 7-day change",
-      extensions: { ...declareDiscoveryExtension({ input: {}, inputSchema: { properties: {}, required: [] } }) },
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: {}, inputSchema: { properties: {}, required: [] },
+        output: { example: { count: 182, cards: [exampleCard] } },
+      }) },
     },
-    "GET /v1/card/*": {
+    "GET /v1/card/:id": {
       accepts: accept(PRICES.card), mimeType: "application/json",
-      description: "One Pokémon TCG card by id with condition-aware market price",
+      description: "One Pokémon TCG card by id (ids come from /v1/cards, /v1/search or the free /v1/sample) with condition-aware market price",
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: {}, inputSchema: { properties: {}, required: [] },
+        pathParams: { id: "122" },
+        pathParamsSchema: { properties: { id: { type: "string", description: "Card id from /v1/cards or /v1/search" } }, required: ["id"] },
+        output: { example: exampleCard },
+      }) },
     },
     "GET /v1/search": {
       accepts: accept(PRICES.search), mimeType: "application/json",
       description: "Search Pokémon TCG cards by name or set; returns condition-aware market prices",
+      ...service,
       extensions: { ...declareDiscoveryExtension({
-        input: { q: "charizard" },
+        input: { q: "pichu" },
         inputSchema: { properties: { q: { type: "string", description: "Card name or set text" } }, required: ["q"] },
+        output: { example: { q: "pichu", count: 1, cards: [exampleCard] } },
       }) },
     },
     "GET /v1/movers": {
       accepts: accept(PRICES.movers), mimeType: "application/json",
       description: "Biggest 7-day price movers (up and down) across tracked Pokémon TCG cards",
+      ...service,
       extensions: { ...declareDiscoveryExtension({
         input: { n: 10 },
         inputSchema: { properties: { n: { type: "number", description: "How many movers each way (max 50)" } }, required: [] },
+        output: { example: { up: [exampleCard], down: [{ ...exampleCard, chg7: -4.1 }] } },
       }) },
     },
   };
