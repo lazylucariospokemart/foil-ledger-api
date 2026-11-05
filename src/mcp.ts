@@ -2,7 +2,7 @@
  * Foil Ledger MCP — the Foil Ledger price API exposed as paid MCP tools (x402, USDC on Base).
  *
  * Any MCP-capable agent (Claude, Cursor, OpenClaw, ...) adds this server's URL and gets
- * get_card_price / search_cards / get_movers / get_all_cards as tools, paying per call.
+ * get_card_price / search_cards / get_movers / get_all_cards / get_sold_prices / comp_card as tools, paying per call.
  * Free tools: get_sample, health.
  *
  * Shares the LEDGER KV namespace with foil-ledger-api so /v1/stats there counts MCP calls too.
@@ -26,14 +26,16 @@ export type McpEnv = {
   CDP_API_KEY_SECRET?: string;
   DATA_URL?: string;
   PRICES_URL?: string;
+  SALES_URL?: string;
   MCP_URL?: string;
 };
 
 const DEFAULT_DATA_URL   = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/data.json";
 const DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/prices/latest.json";
+const DEFAULT_SALES_URL  = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/sales.json";
 const DEFAULT_MCP_URL    = "https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp";
 
-export const MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01" };
+export const MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01", get_sold_prices: "$0.005", comp_card: "$0.01" };
 
 type Card = {
   id: string; name: string; set: string; number: string; cond: string; printing?: string;
@@ -52,7 +54,8 @@ async function loadCards(env: McpEnv): Promise<Card[]> {
   if (!dataRes.ok) throw new Error(`data.json ${dataRes.status}`);
   const data = (await dataRes.json()) as { cards: Record<string, any> };
   const prices = pricesRes.ok ? ((await pricesRes.json()) as Record<string, any>) : {};
-  const cards: Card[] = Object.entries(data.cards).map(([id, c]) => {
+  // the live shelf only: sold cards move to the realized-sales feed (sales.json → /v1/sold)
+  const cards: Card[] = Object.entries(data.cards).filter(([, c]) => !c.sold).map(([id, c]) => {
     const p = c.tcgId && prices[`${c.tcgId}|${c.cond}`];
     return {
       id, name: c.name, set: c.set, number: c.number, cond: c.cond, printing: c.printing,
@@ -66,6 +69,27 @@ async function loadCards(env: McpEnv): Promise<Card[]> {
   cache = { at: Date.now(), cards };
   return cards;
 }
+
+type Sale = {
+  id: string; kind: string; name: string; set?: string; number?: string; cond?: string; printing?: string; tcgId?: string | null;
+  soldPrice: number | null; priceBasis: string; soldAt: string | null; channel: string;
+  market: { price: number | null; chg7: number | null; at?: string }; loggedAt: string; backfilled?: boolean;
+};
+let salesCache: { at: number; sales: Sale[]; updatedAt?: string } | null = null;
+async function loadSales(env: McpEnv): Promise<{ sales: Sale[]; updatedAt?: string }> {
+  if (salesCache && Date.now() - salesCache.at < TTL_MS) return salesCache;
+  const res = await fetch(env.SALES_URL ?? DEFAULT_SALES_URL, { cf: { cacheTtl: 900 } } as RequestInit);
+  const doc = res.ok ? ((await res.json()) as { sales?: Sale[]; updatedAt?: string }) : {};
+  salesCache = { at: Date.now(), sales: (doc.sales ?? []).filter((x) => typeof x.soldPrice === "number"), updatedAt: doc.updatedAt };
+  return salesCache;
+}
+const matchSales = (sales: Sale[], q: string) => sales.filter((x) => `${x.name} ${x.set ?? ""} ${x.number ?? ""} ${x.tcgId ?? ""}`.toLowerCase().includes(q));
+const SALES_NOTE = "Realized sales from one working card shop: the price the seller actually got, next to the market price at the time. priceBasis: desk = entered by the seller, ask = listed asking price, market = no asking price on file so market value is used. soldAt null = logged before the log existed. Small dataset, verified provenance; not a market average.";
+const exampleSale = {
+  id: "54", kind: "single", name: "Zangoose", set: "EX Emerald", number: "21/106", cond: "NM", printing: "Reverse Holofoil",
+  rarity: "Rare", language: "English", tcgId: "90703", soldPrice: 47.75, priceBasis: "market", soldAt: "2026-10-24T06:30:54Z",
+  channel: "vault", market: { price: 47.75, chg7: 0, at: "2026-11-01T20:55:08Z" }, loggedAt: "2026-11-05T21:34:24Z",
+};
 
 const text = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v) }] });
 
@@ -121,12 +145,15 @@ export async function buildServer(env: McpEnv): Promise<McpServer> {
   server.tool("health", "Free. Card count, price freshness, network.", {}, async () => {
     const cards = await loadCards(env);
     const newest = cards.map((x) => x.priceAt ?? "").sort().pop();
-    return text({ ok: true, cards: cards.length, pricesAsOf: newest, network, prices: MCP_PRICES });
+    const { sales, updatedAt } = await loadSales(env);
+    return text({ ok: true, cards: cards.length, pricesAsOf: newest, sales: sales.length, salesAsOf: updatedAt, network, prices: MCP_PRICES });
   });
   server.tool("get_sample", "Free. Three real cards so you can see the response shape before paying.", {}, async () => {
     const cards = (await loadCards(env)).filter((x) => typeof x.chg7 === "number" && x.price >= 1);
     const s = [...cards].sort((a, b) => (b.chg7 as number) - (a.chg7 as number));
-    return text({ note: "Free sample. Other tools are pay-per-call via x402 (USDC on Base).", count: cards.length, cards: [s[0], s[Math.floor(s.length / 2)], s[s.length - 1]].filter(Boolean) });
+    const { sales } = await loadSales(env);
+    const sale = [...sales].sort((a, b) => (b.soldAt ?? "").localeCompare(a.soldAt ?? ""))[0] ?? null;
+    return text({ note: "Free sample. Other tools are pay-per-call via x402 (USDC on Base).", count: cards.length, cards: [s[0], s[Math.floor(s.length / 2)], s[s.length - 1]].filter(Boolean), salesCount: sales.length, sale });
   });
 
   // ---- paid ----
@@ -168,6 +195,36 @@ export async function buildServer(env: McpEnv): Promise<McpServer> {
     { properties: {}, required: [] }, {}, { count: 182, cards: [exampleCard] });
   server.tool("get_all_cards", `All tracked cards. Costs ${MCP_PRICES.get_all_cards}.`, {},
     paidAll(async () => { const cards = await loadCards(env); return text({ count: cards.length, cards }); }));
+
+  const paidSold = await paidTool("get_sold_prices",
+    `Realized Pokémon TCG sales from a live card shop: the price actually received per card (condition, printing, basis, channel) next to the market price at the time. Ground truth, not an aggregate. Costs ${MCP_PRICES.get_sold_prices} USDC.`,
+    { properties: { q: { type: "string", description: "Card name, set or number text (optional)" }, n: { type: "number", description: "Max results (default 200, max 500)" } }, required: [] },
+    { q: "zangoose" }, { q: "zangoose", count: 1, sales: [exampleSale] });
+  server.tool("get_sold_prices", `Realized sales (what the shop actually got). Costs ${MCP_PRICES.get_sold_prices}.`, { q: z.string().optional(), n: z.number().optional() },
+    paidSold(async ({ q, n }) => {
+      const needle = (q ?? "").toLowerCase().trim();
+      const k = Math.min(500, Math.max(1, Number(n ?? 200)));
+      const { sales, updatedAt } = await loadSales(env);
+      const hits = (needle ? matchSales(sales, needle) : sales).slice(-k).reverse();
+      return text({ q: needle || undefined, count: hits.length, total: sales.length, asOf: updatedAt, note: SALES_NOTE, sales: hits });
+    }));
+
+  const paidComp = await paidTool("comp_card",
+    `Comp one Pokémon TCG card: matching cards' live condition-aware market prices next to the same shop's realized sales of that card (what it actually sold for and when). Costs ${MCP_PRICES.comp_card} USDC.`,
+    { properties: { q: { type: "string", description: "Card name, set or number text" } }, required: ["q"] },
+    { q: "zangoose" }, { q: "zangoose", listed: [exampleCard], sold: [exampleSale], summary: { listedCount: 1, soldCount: 1, lastSold: 47.75, lastSoldAt: "2026-10-24T06:30:54Z", avgSoldVsMarketPct: 0 } });
+  server.tool("comp_card", `Market price next to realized sales for one card. Costs ${MCP_PRICES.comp_card}.`, { q: z.string() },
+    paidComp(async ({ q }) => {
+      const needle = q.toLowerCase().trim();
+      const [cards, { sales, updatedAt }] = await Promise.all([loadCards(env), loadSales(env)]);
+      const listed = cards.filter((x) => `${x.name} ${x.set} ${x.number}`.toLowerCase().includes(needle)).slice(0, 50);
+      const sold = matchSales(sales, needle).slice(-50).reverse();
+      const last = sold.find((x) => x.soldAt) ?? sold[0];
+      const ratios = sold.filter((x) => x.market.price && x.priceBasis !== "market").map((x) => ((x.soldPrice as number) / (x.market.price as number) - 1) * 100);
+      const summary = { listedCount: listed.length, soldCount: sold.length, lastSold: last?.soldPrice ?? null, lastSoldAt: last?.soldAt ?? null, lastSoldCond: last?.cond ?? null,
+        avgSoldVsMarketPct: ratios.length ? +(ratios.reduce((a, b) => a + b, 0) / ratios.length).toFixed(1) : null };
+      return text({ q: needle, asOf: updatedAt, note: SALES_NOTE, listed, sold, summary });
+    }));
 
   return server;
 }

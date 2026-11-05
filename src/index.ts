@@ -27,10 +27,12 @@ type Env = {
   REFERRAL_PCT?: string;        // e.g. "10"
   DATA_URL?: string;
   PRICES_URL?: string;
+  SALES_URL?: string;
 };
 
 const DEFAULT_DATA_URL   = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/data.json";
 const DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/prices/latest.json";
+const DEFAULT_SALES_URL  = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/sales.json";
 
 // ---------- prices (what we sell) ----------
 const PRICES = {
@@ -38,6 +40,8 @@ const PRICES = {
   card:   "$0.002",   // one card
   search: "$0.005",   // name search
   movers: "$0.01",    // top 7-day movers
+  sold:   "$0.005",   // realized sales (what the shop actually got)
+  comp:   "$0.01",    // one card: market price next to realized sales
 };
 
 type Card = {
@@ -59,7 +63,8 @@ async function loadCards(env: Env): Promise<Card[]> {
   const data = (await dataRes.json()) as { cards: Record<string, any> };
   const prices = pricesRes.ok ? ((await pricesRes.json()) as Record<string, any>) : {};
 
-  const cards: Card[] = Object.entries(data.cards).map(([id, c]) => {
+  // the live shelf only: sold cards move to the realized-sales feed (sales.json → /v1/sold)
+  const cards: Card[] = Object.entries(data.cards).filter(([, c]) => !c.sold).map(([id, c]) => {
     // prefer the daily price file when it has this card+condition
     const p = c.tcgId && prices[`${c.tcgId}|${c.cond}`];
     return {
@@ -69,7 +74,7 @@ async function loadCards(env: Env): Promise<Card[]> {
       chg7: p?.chg7 ?? c.chg7 ?? null,
       priceAt: p?.at ?? c.priceAt,
       kind: c.kind ?? "single",
-      // deliberately NOT exposed: ask (Lazy's asking price), notes, qty, sold, photo, cert
+      // deliberately NOT exposed: ask (Lazy's asking price), notes, qty, photo, cert
     };
   });
   cache = { at: Date.now(), cards };
@@ -77,6 +82,27 @@ async function loadCards(env: Env): Promise<Card[]> {
 }
 
 const pub = (c: Card) => c; // already stripped above
+
+// ---------- realized sales (ground truth: what this shop actually got) ----------
+type Sale = {
+  id: string; kind: string; name: string; set?: string; number?: string; cond?: string; printing?: string;
+  rarity?: string; language?: string; grade?: string; grader?: string; sealedType?: string; tcgId?: string | null;
+  soldPrice: number | null; priceBasis: "desk" | "ask" | "market"; soldAt: string | null; channel: string;
+  market: { price: number | null; chg7: number | null; at?: string }; loggedAt: string; backfilled?: boolean;
+};
+let salesCache: { at: number; sales: Sale[]; updatedAt?: string } | null = null;
+
+async function loadSales(env: Env): Promise<{ sales: Sale[]; updatedAt?: string }> {
+  if (salesCache && Date.now() - salesCache.at < TTL_MS) return salesCache;
+  const res = await fetch(env.SALES_URL ?? DEFAULT_SALES_URL, { cf: { cacheTtl: 900 } } as RequestInit);
+  const doc = res.ok ? ((await res.json()) as { sales?: Sale[]; updatedAt?: string }) : {};
+  const sales = (doc.sales ?? []).filter((x) => typeof x.soldPrice === "number");
+  salesCache = { at: Date.now(), sales, updatedAt: doc.updatedAt };
+  return salesCache;
+}
+const saleText = (x: Sale) => `${x.name} ${x.set ?? ""} ${x.number ?? ""} ${x.tcgId ?? ""}`.toLowerCase();
+const matchSales = (sales: Sale[], q: string) => sales.filter((x) => saleText(x).includes(q));
+const SALES_NOTE = "Realized sales from one working card shop (Lazy Lucario Vault): the price the seller actually got, next to the TCGplayer-based market price at the time. priceBasis: desk = entered by the seller, ask = the listed asking price, market = no asking price on file so market value is used. soldAt is null for sales logged before the log existed (backfilled: true). Small dataset, verified provenance; not a market average.";
 
 // ---------- app ----------
 const app = new Hono<{ Bindings: Env }>();
@@ -95,12 +121,15 @@ app.get("/", (c) => c.json({
     "GET /v1/card/:id":     { price: PRICES.card,   desc: "One card by id" },
     "GET /v1/search?q=":    { price: PRICES.search, desc: "Search by card name / set" },
     "GET /v1/movers?n=10":  { price: PRICES.movers, desc: "Biggest 7-day movers, up and down" },
-    "GET /v1/sample":       { price: "free",        desc: "Three real cards so you can see the response shape" },
+    "GET /v1/sold?q=&n=":   { price: PRICES.sold,   desc: "Realized sales: what this shop actually got per card, with the market price at the time (q filters by name/set/number)" },
+    "GET /v1/comp?q=":      { price: PRICES.comp,   desc: "Comp one card: live market price for matching cards next to this shop's realized sales of them" },
+    "GET /v1/sample":       { price: "free",        desc: "Three real cards and one real sale so you can see the response shapes" },
     "GET /v1/health":       { price: "free",        desc: "Freshness + card count" },
     "GET /v1/stats":        { price: "free",        desc: "Calls and USDC earned today / last 7 days (no addresses)" },
     "GET /v1/referrals/:address": { price: "free",  desc: "Referral earnings for a wallet" },
   },
   mcp: { url: new URL("/mcp", c.req.url).toString(), transport: "streamable-http", tools: { ...MCP_PRICES, get_sample: "free", health: "free" }, note: "Same data as the REST routes, as MCP tools with x402 payment per call" },
+  groundTruth: SALES_NOTE,
   referrals: `Add ?ref=0xYourWallet to any paid call. You earn ${c.env.REFERRAL_PCT ?? "10"}% of every call you bring, paid out weekly in USDC. One level, sales only.`,
   docs: "https://docs.x402.org",
   owner: "Lazy Lucario — lazylucariospokemart.github.io/lazy-lucario-vault",
@@ -109,7 +138,8 @@ app.get("/", (c) => c.json({
 app.get("/v1/health", async (c) => {
   const cards = await loadCards(c.env);
   const newest = cards.map((x) => x.priceAt ?? "").sort().pop();
-  return c.json({ ok: true, cards: cards.length, pricesAsOf: newest, network: c.env.NETWORK ?? "eip155:84532" });
+  const { sales, updatedAt } = await loadSales(c.env);
+  return c.json({ ok: true, cards: cards.length, pricesAsOf: newest, sales: sales.length, salesAsOf: updatedAt, network: c.env.NETWORK ?? "eip155:84532" });
 });
 
 // Free sample: 3 real cards so buyers can see the shape before paying
@@ -117,7 +147,9 @@ app.get("/v1/sample", async (c) => {
   const cards = (await loadCards(c.env)).filter((x) => typeof x.chg7 === "number" && x.price >= 1);
   const sorted = [...cards].sort((a, b) => (b.chg7 as number) - (a.chg7 as number));
   const sample = [sorted[0], sorted[Math.floor(sorted.length / 2)], sorted[sorted.length - 1]].filter(Boolean);
-  return c.json({ note: "Free sample. Full data is pay-per-call; see / for prices.", count: cards.length, cards: sample.map(pub) });
+  const { sales } = await loadSales(c.env);
+  const sale = [...sales].sort((a, b) => (b.soldAt ?? "").localeCompare(a.soldAt ?? ""))[0] ?? null;
+  return c.json({ note: "Free sample. Full data is pay-per-call; see / for prices.", count: cards.length, cards: sample.map(pub), salesCount: sales.length, sale });
 });
 
 // Free stats for the factory Foreman: calls + USDC earned, no addresses
@@ -196,7 +228,32 @@ app.use("*", async (c, next) => {
     printing: "1st Edition - Japanese", rarity: "Rare", language: "Japanese", price: 90, chg7: 33.33,
     priceAt: "2026-11-03T14:35:10Z", kind: "single",
   };
+  const exampleSale = {
+    id: "54", kind: "single", name: "Zangoose", set: "EX Emerald", number: "21/106", cond: "NM", printing: "Reverse Holofoil",
+    rarity: "Rare", language: "English", tcgId: "90703", soldPrice: 47.75, priceBasis: "market", soldAt: "2026-10-24T06:30:54Z",
+    channel: "vault", market: { price: 47.75, chg7: 0, at: "2026-11-01T20:55:08Z" }, loggedAt: "2026-11-05T21:34:24Z",
+  };
   const routes: RoutesConfig = {
+    "GET /v1/sold": {
+      accepts: accept(PRICES.sold), mimeType: "application/json",
+      description: "Realized Pokémon TCG sales from a live card shop: the price actually received per card (with condition, printing, basis and channel) next to the market price at the time. Ground truth, not an aggregate. Optional q filters by name/set/number, n caps results",
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: { q: "zangoose", n: 50 },
+        inputSchema: { properties: { q: { type: "string", description: "Card name, set or number text (optional)" }, n: { type: "number", description: "Max results (default 200, max 500)" } }, required: [] },
+        output: { example: { q: "zangoose", count: 1, asOf: "2026-11-05T21:34:24Z", sales: [exampleSale] } },
+      }) },
+    },
+    "GET /v1/comp": {
+      accepts: accept(PRICES.comp), mimeType: "application/json",
+      description: "Comp one Pokémon TCG card: matching cards' live condition-aware market prices next to the same shop's realized sales of that card (what it actually sold for and when)",
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: { q: "zangoose" },
+        inputSchema: { properties: { q: { type: "string", description: "Card name, set or number text" } }, required: ["q"] },
+        output: { example: { q: "zangoose", listed: [exampleCard], sold: [exampleSale], summary: { listedCount: 1, soldCount: 1, lastSold: 47.75, lastSoldAt: "2026-10-24T06:30:54Z", avgSoldVsMarketPct: 0 } } },
+      }) },
+    },
     "GET /v1/cards": {
       accepts: accept(PRICES.cards), mimeType: "application/json",
       description: "All tracked Pokémon TCG cards from a live card shop inventory: name, set, number, condition, printing, TCGplayer-based market price, 7-day change",
@@ -267,6 +324,31 @@ app.get("/v1/movers", async (c) => {
   const cards = (await loadCards(c.env)).filter((x) => typeof x.chg7 === "number" && x.price >= 1);
   const sorted = [...cards].sort((a, b) => (b.chg7 as number) - (a.chg7 as number));
   return c.json({ up: sorted.slice(0, n).map(pub), down: sorted.slice(-n).reverse().map(pub) });
+});
+
+app.get("/v1/sold", async (c) => {
+  const q = (c.req.query("q") ?? "").toLowerCase().trim();
+  const n = Math.min(500, Math.max(1, Number(c.req.query("n") ?? 200)));
+  const { sales, updatedAt } = await loadSales(c.env);
+  const hits = (q ? matchSales(sales, q) : sales).slice(-n).reverse();
+  return c.json({ q: q || undefined, count: hits.length, total: sales.length, asOf: updatedAt, note: SALES_NOTE, sales: hits });
+});
+
+app.get("/v1/comp", async (c) => {
+  const q = (c.req.query("q") ?? "").toLowerCase().trim();
+  if (!q) return c.json({ error: "q required" }, 400);
+  const [cards, { sales, updatedAt }] = await Promise.all([loadCards(c.env), loadSales(c.env)]);
+  const listed = cards.filter((x) => `${x.name} ${x.set} ${x.number}`.toLowerCase().includes(q)).slice(0, 50).map(pub);
+  const sold = matchSales(sales, q).slice(-50).reverse();
+  const dated = sold.filter((x) => x.soldAt);
+  const last = dated[0] ?? sold[0];
+  const ratios = sold.filter((x) => x.market.price && x.priceBasis !== "market").map((x) => ((x.soldPrice as number) / (x.market.price as number) - 1) * 100);
+  const summary = {
+    listedCount: listed.length, soldCount: sold.length,
+    lastSold: last?.soldPrice ?? null, lastSoldAt: last?.soldAt ?? null, lastSoldCond: last?.cond ?? null,
+    avgSoldVsMarketPct: ratios.length ? +(ratios.reduce((a, b) => a + b, 0) / ratios.length).toFixed(1) : null,
+  };
+  return c.json({ q, asOf: updatedAt, note: SALES_NOTE, listed, sold, summary });
 });
 
 export default app;

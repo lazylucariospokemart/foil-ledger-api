@@ -13,11 +13,13 @@ This is the price feed behind [Lazy Lucario's storefront](https://lazylucariospo
 
 It is **not** the whole Pokémon market. It's ~200 cards at any time: the ones a working seller is actually buying, holding, and selling. If you want "every card ever printed," use TCGplayer directly. If you want a signal for what's *moving on a real seller's shelf*, this is that.
 
+It also carries something no aggregate has: **realized sales**. When a card sells off the shelf, it moves to `/v1/sold` with the price the seller actually got, the condition, when, through which channel, and the market price at the time. One shop, verified provenance, small numbers. `/v1/comp` puts the two side by side for one card: "market says $42; this shop sold an NM for $38 on Oct 29."
+
 ## Try it free
 
 ```
-GET /v1/sample     → 3 real cards, full response shape
-GET /v1/health     → card count + network
+GET /v1/sample     → 3 real cards + 1 real sale, full response shapes
+GET /v1/health     → card count, sales count, freshness, network
 ```
 
 Example (`/v1/sample`):
@@ -53,6 +55,8 @@ Example (`/v1/sample`):
 | `GET /v1/card/:id` | $0.002 | One card |
 | `GET /v1/search?q=charizard` | $0.005 | Name/set search, up to 100 hits |
 | `GET /v1/movers?n=10` | $0.01 | Biggest 7-day movers, up and down |
+| `GET /v1/sold?q=&n=` | $0.005 | Realized sales: what the shop actually got per card, with the market price at the time |
+| `GET /v1/comp?q=zangoose` | $0.01 | One card comped: live market prices for matching cards next to the shop's realized sales of it |
 
 Network: Base mainnet (`eip155:8453`). Scheme: `exact`. Asset: USDC.
 Any x402 client works; with the official one:
@@ -88,6 +92,8 @@ https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp
 | `search_cards` `{q}` | $0.005 | name/set search |
 | `get_movers` `{n}` | $0.01 | biggest 7-day movers |
 | `get_all_cards` | $0.005 | every tracked card |
+| `get_sold_prices` `{q?, n?}` | $0.005 | realized sales (what the shop actually got) |
+| `comp_card` `{q}` | $0.01 | market price next to realized sales for one card |
 
 Client side with the official SDK:
 
@@ -117,7 +123,8 @@ If you're building a buyer-agent, a price tool, or a Discord bot that pulls card
 
 - Best effort. Prices refresh once a day from the shop's own pipeline. If the pipeline hiccups, `/v1/health` tells you how fresh the data is.
 - Prices are market reference (TCGplayer-based), not the shop's asking prices.
-- Listed on Bazaar (x402 discovery) on the `/v1/cards`, `/v1/search` and `/v1/movers` routes.
+- Sold prices come with a `priceBasis`: `desk` (entered by the seller), `ask` (the listed asking price the buyer paid), or `market` (no asking price on file, so the market value at the time is used). Sales logged before the log existed have `soldAt: null` and `backfilled: true`. It's a small dataset by design: it's what one real shop sold, not a market average.
+- Listed on Bazaar (x402 discovery) on the `/v1/cards`, `/v1/search`, `/v1/movers`, `/v1/sold` and `/v1/comp` routes.
 
 ## Run your own
 
