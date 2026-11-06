@@ -52114,27 +52114,39 @@ function discoveryApp(paid, free, mcpTools) {
   });
   const agentJson = /* @__PURE__ */ __name((c) => {
     const network = c.env.NETWORK ?? "eip155:8453";
+    const pct = Number(c.env.REFERRAL_PCT ?? 10);
+    const usd = /* @__PURE__ */ __name((p) => Number(p.replace("$", "")), "usd");
+    const bounty = /* @__PURE__ */ __name((p) => ({ type: "cpa", rate: +(usd(p) * pct / 100).toFixed(6), currency: "USDC" }), "bounty");
+    const cheapest = Math.min(...paid.map((r) => usd(r.price)));
     return c.json({
       version: "1.3",
-      awp_version: "0.2",
       origin: host(c.req.url),
-      domain: host(c.req.url),
       display_name: NAME,
       description: DESC,
-      intent: DESC,
       payout_address: c.env.PAY_TO,
-      payments: { x402: { networks: [{ network: netName(network), caip2: network, asset: "USDC", contract: USDC_BASE }] } },
-      protocols: { x402: `${origin(c.req.url)}/.well-known/x402`, openapi: `${origin(c.req.url)}/openapi.json`, mcp: `${origin(c.req.url)}/mcp` },
+      payments: { x402: { networks: [{ network: netName(network), asset: "USDC", contract: USDC_BASE }] } },
       intents: all.map((r) => ({
         name: r.path.replace(/^\/v1\//, "").replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "") || "root",
         description: r.desc,
         endpoint: r.path,
         method: r.method,
-        price: r.price === "free" ? { amount: 0, currency: "USDC" } : { amount: Number(r.price.replace("$", "")), currency: "USDC" }
+        parameters: Object.fromEntries([
+          ...r.pathParam ? [[r.pathParam, { type: "string", required: true, description: `Path parameter ${r.pathParam}` }]] : [],
+          ...Object.entries(r.query ?? {}).map(([k, d]) => [k, { type: "string", required: false, description: d }])
+        ]),
+        price: r.price === "free" ? { amount: 0, currency: "USDC" } : { amount: usd(r.price), currency: "USDC" },
+        ...r.price === "free" ? {} : { bounty: bounty(r.price) }
       })),
-      referrals: { pct: Number(c.env.REFERRAL_PCT ?? 10), how: "append ?ref=0xYourWallet to any paid call; tally at /v1/referrals/:address" },
-      docs: REPO,
-      updated: UPDATED
+      bounty: { type: "cpa", rate: +(cheapest * pct / 100).toFixed(6), currency: "USDC" },
+      extensions: {
+        foilledger: {
+          referrals: { pct, how: "append ?ref=0xYourWallet to any paid call; the bounty is pct% of that call's price, settled weekly in USDC; free tally at /v1/referrals/:address" },
+          protocols: { x402: `${origin(c.req.url)}/.well-known/x402`, openapi: `${origin(c.req.url)}/openapi.json`, mcp: `${origin(c.req.url)}/mcp`, llms: `${origin(c.req.url)}/llms.txt` },
+          caip2: network,
+          docs: REPO,
+          updated: UPDATED
+        }
+      }
     }, 200, cacheHdr);
   }, "agentJson");
   app2.get("/.well-known/agent.json", agentJson);
