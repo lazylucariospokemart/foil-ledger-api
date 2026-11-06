@@ -16,6 +16,7 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { handleMcp, MCP_PRICES } from "./mcp";
+import { discoveryApp, type RouteInfo } from "./discovery";
 
 type Env = {
   LEDGER: KVNamespace;          // referral + call ledger
@@ -111,6 +112,24 @@ app.use("*", cors({ origin: "*", exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RE
 // MCP: the same data as paid tools for agents (Claude, Cursor, ...). Stateless streamable-HTTP.
 app.all("/mcp", (c) => handleMcp(c.req.raw, c.env));
 
+// Free discovery files for indexers: /.well-known/x402, agent.json, openapi.json, llms.txt, ...
+const PAID_ROUTES: RouteInfo[] = [
+  { method: "GET", path: "/v1/cards",     price: PRICES.cards,  desc: "All tracked cards with current market price and 7-day change" },
+  { method: "GET", path: "/v1/card/:id",  price: PRICES.card,   desc: "One card by id (ids from /v1/cards, /v1/search or the free /v1/sample)", pathParam: "id" },
+  { method: "GET", path: "/v1/search",    price: PRICES.search, desc: "Search by card name / set", query: { q: "Card name or set text" } },
+  { method: "GET", path: "/v1/movers",    price: PRICES.movers, desc: "Biggest 7-day movers, up and down", query: { n: "How many each way (max 50)" } },
+  { method: "GET", path: "/v1/sold",      price: PRICES.sold,   desc: "Realized sales: what this shop actually got per card, with the market price at the time", query: { q: "Filter by name/set/number", n: "Max results (max 500)" } },
+  { method: "GET", path: "/v1/comp",      price: PRICES.comp,   desc: "Comp one card: live market price for matching cards next to this shop's realized sales", query: { q: "Card name, set or number text" } },
+];
+const FREE_ROUTES: RouteInfo[] = [
+  { method: "GET", path: "/",             price: "free", desc: "Landing: endpoints, prices, MCP, referral terms" },
+  { method: "GET", path: "/v1/sample",    price: "free", desc: "Three real cards and one real sale so you can see the response shapes" },
+  { method: "GET", path: "/v1/health",    price: "free", desc: "Freshness + card count" },
+  { method: "GET", path: "/v1/stats",     price: "free", desc: "Calls and USDC earned today / last 7 days (no addresses)" },
+  { method: "GET", path: "/v1/referrals/:address", price: "free", desc: "Referral earnings for a wallet", pathParam: "address" },
+];
+app.route("/", discoveryApp(PAID_ROUTES, FREE_ROUTES, { ...MCP_PRICES, get_sample: "free", health: "free" }));
+
 // Free: landing + docs for humans and agents
 app.get("/", (c) => c.json({
   name: "Foil Ledger API",
@@ -132,6 +151,7 @@ app.get("/", (c) => c.json({
   groundTruth: SALES_NOTE,
   referrals: `Add ?ref=0xYourWallet to any paid call. You earn ${c.env.REFERRAL_PCT ?? "10"}% of every call you bring, paid out weekly in USDC. One level, sales only.`,
   docs: "https://docs.x402.org",
+  discovery: { openapi: new URL("/openapi.json", c.req.url).toString(), llms: new URL("/llms.txt", c.req.url).toString(), x402: new URL("/.well-known/x402", c.req.url).toString(), agent: new URL("/.well-known/agent.json", c.req.url).toString() },
   owner: "Lazy Lucario — lazylucariospokemart.github.io/lazy-lucario-vault",
 }));
 
