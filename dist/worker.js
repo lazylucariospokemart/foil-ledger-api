@@ -52367,15 +52367,17 @@ app.get("/v1/sample", async (c) => {
 app.get("/v1/stats", async (c) => {
   const chi = new Date((/* @__PURE__ */ new Date()).toLocaleString("en-US", { timeZone: "America/Chicago" }));
   const day = /* @__PURE__ */ __name((d) => d.toISOString().slice(0, 10), "day");
+  const want = Math.min(60, Math.max(7, Number(c.req.query("days") ?? 7) || 7));
   const days = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < want; i++) {
     const d = new Date(chi);
     d.setDate(chi.getDate() - i);
     days.push(day(d));
   }
   const rows = await Promise.all(days.map(async (k) => JSON.parse(await c.env.LEDGER.get(`day:${k}`) ?? "null")));
   const today = rows[0] ?? { calls: 0, usd: 0, byRoute: {} };
-  const last7 = rows.reduce((a, r) => r ? { calls: a.calls + r.calls, usd: +(a.usd + r.usd).toFixed(6) } : a, { calls: 0, usd: 0 });
+  const last7 = rows.slice(0, 7).reduce((a, r) => r ? { calls: a.calls + r.calls, usd: +(a.usd + r.usd).toFixed(6) } : a, { calls: 0, usd: 0 });
+  const byDay = want > 7 ? days.map((k, i) => ({ date: k, calls: rows[i]?.calls ?? 0, usd: rows[i]?.usd ?? 0 })).filter((r) => r.calls > 0) : void 0;
   let owed = 0, referrers = 0;
   const list = await c.env.LEDGER.list({ prefix: "ref:" });
   for (const k of list.keys) {
@@ -52383,7 +52385,7 @@ app.get("/v1/stats", async (c) => {
     referrers++;
     owed += (r.owedUsd ?? 0) - (r.paidUsd ?? 0);
   }
-  return c.json({ network: c.env.NETWORK ?? "eip155:84532", today: { date: days[0], calls: today.calls, usd: today.usd, byRoute: today.byRoute }, last7, referrers, referralOwedUsd: +owed.toFixed(6) });
+  return c.json({ network: c.env.NETWORK ?? "eip155:84532", today: { date: days[0], calls: today.calls, usd: today.usd, byRoute: today.byRoute }, last7, ...byDay ? { byDay } : {}, referrers, referralOwedUsd: +owed.toFixed(6) });
 });
 app.get("/v1/referrals/:address", async (c) => {
   const addr = c.req.param("address").toLowerCase();
@@ -52598,4 +52600,4 @@ content-type/index.js:
    * MIT Licensed
    *)
 */
-//# sourceMappingURL=index.js.map
+
