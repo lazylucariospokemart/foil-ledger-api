@@ -14,7 +14,8 @@ id = "622d160e79d84085a30dbe57e9bb0018"
 NETWORK = "eip155:8453"                        # Base mainnet
 FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
 REFERRAL_PCT = "10"
-# PAY_TO is set as a secret:  npx wrangler secret put PAY_TO   (paste your PUBLIC 0x address)
+# PAY_TO is the PUBLIC payout address (USDC on Base). It must live here: `wrangler deploy` replaces dashboard variables.
+PAY_TO = "0x3cA43880345E8C16Fd3A6F7aD48e2Db9595e4629"
 
 # Secrets set in the Cloudflare dashboard: PAY_TO, CDP_API_KEY_ID, CDP_API_KEY_SECRET
 # ---- TESTNET: change the two lines above back to ----
