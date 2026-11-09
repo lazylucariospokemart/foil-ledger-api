@@ -52377,7 +52377,7 @@ app.get("/v1/stats", async (c) => {
   const rows = await Promise.all(days.map(async (k) => JSON.parse(await c.env.LEDGER.get(`day:${k}`) ?? "null")));
   const today = rows[0] ?? { calls: 0, usd: 0, byRoute: {} };
   const last7 = rows.slice(0, 7).reduce((a, r) => r ? { calls: a.calls + r.calls, usd: +(a.usd + r.usd).toFixed(6) } : a, { calls: 0, usd: 0 });
-  const byDay = want > 7 ? days.map((k, i) => ({ date: k, calls: rows[i]?.calls ?? 0, usd: rows[i]?.usd ?? 0 })).filter((r) => r.calls > 0) : void 0;
+  const byDay = want > 7 ? days.map((k, i) => ({ date: k, calls: rows[i]?.calls ?? 0, usd: rows[i]?.usd ?? 0, ownCalls: rows[i]?.ownCalls ?? 0, ownUsd: rows[i]?.ownUsd ?? 0 })).filter((r) => r.calls > 0 || r.ownCalls > 0) : void 0;
   let owed = 0, referrers = 0;
   const list = await c.env.LEDGER.list({ prefix: "ref:" });
   for (const k of list.keys) {
@@ -52406,13 +52406,22 @@ app.use("*", async (c, next) => {
       const usd = Number(atomic) / 1e6;
       const pct = Number(env.REFERRAL_PCT ?? 10);
       const day = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+      const own2 = (env.OWN_WALLETS ?? "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+      const payer = String(ctx.result.payer ?? "").toLowerCase();
+      const isOwn = !!payer && own2.includes(payer);
       const dKey = `day:${day}`;
       const d = JSON.parse(await env.LEDGER.get(dKey) ?? '{"calls":0,"usd":0,"byRoute":{}}');
       const route = new URL(url2).pathname;
-      d.calls++;
-      d.usd = +(d.usd + usd).toFixed(6);
-      d.byRoute[route] = (d.byRoute[route] ?? 0) + 1;
+      if (isOwn) {
+        d.ownCalls = (d.ownCalls ?? 0) + 1;
+        d.ownUsd = +((d.ownUsd ?? 0) + usd).toFixed(6);
+      } else {
+        d.calls++;
+        d.usd = +(d.usd + usd).toFixed(6);
+        d.byRoute[route] = (d.byRoute[route] ?? 0) + 1;
+      }
       await env.LEDGER.put(dKey, JSON.stringify(d), { expirationTtl: 60 * 60 * 24 * 400 });
+      if (isOwn) return;
       if (ref && /^0x[0-9a-f]{40}$/.test(ref) && ref !== (env.PAY_TO ?? "").toLowerCase()) {
         const key = `ref:${ref}`;
         const r = JSON.parse(await env.LEDGER.get(key) ?? '{"calls":0,"grossUsd":0,"owedUsd":0,"paidUsd":0,"lastTx":""}');

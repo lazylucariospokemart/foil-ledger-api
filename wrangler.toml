@@ -16,6 +16,8 @@ FACILITATOR_URL = "https://api.cdp.coinbase.com/platform/v2/x402"
 REFERRAL_PCT = "10"
 # PAY_TO is the PUBLIC payout address (USDC on Base). It must live here: `wrangler deploy` replaces dashboard variables.
 PAY_TO = "0x3cA43880345E8C16Fd3A6F7aD48e2Db9595e4629"
+# Lazy's own buyer wallets (public addresses): their paid calls are tallied as "own", not income
+OWN_WALLETS = "0xeccfb01d65de7d08860d894e544d98453644d8b3"
 
 # Secrets set in the Cloudflare dashboard: PAY_TO, CDP_API_KEY_ID, CDP_API_KEY_SECRET
 # ---- TESTNET: change the two lines above back to ----
