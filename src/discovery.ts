@@ -24,10 +24,10 @@ export type DiscoveryEnv = {
 export type RouteInfo = { method: "GET"; path: string; price: string; desc: string; query?: Record<string, string>; pathParam?: string };
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const UPDATED = "2026-11-06T07:40:00Z";
+const UPDATED = "2026-11-12T23:59:00Z";
 
 const NAME = "Foil Ledger API";
-const DESC = "Condition-aware Pokémon TCG market prices (TCGplayer-based, refreshed daily) plus realized sales from a working card shop. Pay per call with USDC on Base via x402; also available as paid MCP tools at /mcp.";
+const DESC = "Condition-aware Pokémon TCG market prices (TCGplayer-based, refreshed daily), realized sales from a working card shop, and card scanning: send a photo of any Pokémon card, get the exact card and its TCGplayer prices. Pay per call with USDC on Base via x402; also available as paid MCP tools at /mcp.";
 const REPO = "https://github.com/lazylucariospokemart/foil-ledger-api";
 
 function netName(n: string) { return n === "eip155:8453" ? "base" : n === "eip155:84532" ? "base-sepolia" : n; }

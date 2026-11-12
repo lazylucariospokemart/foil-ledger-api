@@ -9,6 +9,10 @@ compatibility_flags = ["nodejs_compat"]
 binding = "LEDGER"
 id = "622d160e79d84085a30dbe57e9bb0018"
 
+# Workers AI: the vision model behind /v1/scan and the scan_card MCP tool
+[ai]
+binding = "AI"
+
 [vars]
 # ---- MAINNET (live since 2026-11-04) ----
 NETWORK = "eip155:8453"                        # Base mainnet

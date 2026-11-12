@@ -2,7 +2,7 @@
  * Foil Ledger MCP — the Foil Ledger price API exposed as paid MCP tools (x402, USDC on Base).
  *
  * Any MCP-capable agent (Claude, Cursor, OpenClaw, ...) adds this server's URL and gets
- * get_card_price / search_cards / get_movers / get_all_cards / get_sold_prices / comp_card as tools, paying per call.
+ * get_card_price / search_cards / get_movers / get_all_cards / get_sold_prices / comp_card / scan_card as tools, paying per call.
  * Free tools: get_sample, health.
  *
  * Shares the LEDGER KV namespace with foil-ledger-api so /v1/stats there counts MCP calls too.
@@ -16,9 +16,12 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
+import { scanCard, imageFromInput, shopMatches, exampleScan, SCAN_PRICE } from "./scan";
 
 export type McpEnv = {
   LEDGER: KVNamespace;
+  AI: Ai;
+  SCAN_MODEL?: string;
   PAY_TO: string;
   NETWORK?: string;
   FACILITATOR_URL?: string;
@@ -35,7 +38,7 @@ const DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/lazylucariospokema
 const DEFAULT_SALES_URL  = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/sales.json";
 const DEFAULT_MCP_URL    = "https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp";
 
-export const MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01", get_sold_prices: "$0.005", comp_card: "$0.01" };
+export const MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01", get_sold_prices: "$0.005", comp_card: "$0.01", scan_card: SCAN_PRICE };
 
 type Card = {
   id: string; name: string; set: string; number: string; cond: string; printing?: string;
@@ -224,6 +227,20 @@ export async function buildServer(env: McpEnv): Promise<McpServer> {
       const summary = { listedCount: listed.length, soldCount: sold.length, lastSold: last?.soldPrice ?? null, lastSoldAt: last?.soldAt ?? null, lastSoldCond: last?.cond ?? null,
         avgSoldVsMarketPct: ratios.length ? +(ratios.reduce((a, b) => a + b, 0) / ratios.length).toFixed(1) : null };
       return text({ q: needle, asOf: updatedAt, note: SALES_NOTE, listed, sold, summary });
+    }));
+
+  const paidScan = await paidTool("scan_card",
+    `Scan any Pokémon TCG card from a photo: identifies the exact card (name, collector number, set, printing, language) and returns TCGplayer market/low/mid/high prices per printing, a condition estimate from the photo, and this shop's own listings and realized sales of it. Charged only when a card is matched. Costs ${MCP_PRICES.scan_card} USDC.`,
+    { properties: { image_url: { type: "string", description: "Public URL of a card photo (jpg/png/webp, max 4 MB)" }, image_base64: { type: "string", description: "Or the photo as base64 / a data URL" } }, required: [] },
+    { image_url: "https://assets.tcgdex.net/en/ex/ex9/21/high.png" }, exampleScan);
+  server.tool("scan_card", `Photo of a Pokémon card -> exact card + prices. Costs ${MCP_PRICES.scan_card}, only on a match.`, { image_url: z.string().optional(), image_base64: z.string().optional() },
+    paidScan(async ({ image_url, image_base64 }) => {
+      const img = await imageFromInput({ url: image_url, base64: image_base64 });
+      if ("ok" in img) return { ...text({ error: img.error }), isError: true };
+      const res = await scanCard(env, img.dataUrl);
+      if (!res.ok) return { ...text({ error: res.error, read: res.read }), isError: true }; // isError → settlement cancelled, no charge
+      const [cards, { sales }] = await Promise.all([loadCards(env).catch(() => [] as Card[]), loadSales(env).catch(() => ({ sales: [] as Sale[] }))]);
+      return text({ ...res, shop: { listed: shopMatches(cards, res), sold: shopMatches(sales, res), note: "This shop's own listings and realized sales of the matched card, if any." } });
     }));
 
   return server;
