@@ -15,11 +15,25 @@ It is **not** the whole Pokémon market. It's ~200 cards at any time: the ones a
 
 It also carries something no aggregate has: **realized sales**. When a card sells off the shelf, it moves to `/v1/sold` with the price the seller actually got, the condition, when, through which channel, and the market price at the time. One shop, verified provenance, small numbers. `/v1/comp` puts the two side by side for one card: "market says $42; this shop sold an NM for $38 on Oct 29."
 
+## New: scan any Pokémon card from a photo
+
+`/v1/scan` works on **any** Pokémon card, not just the shop's shelf. Send a photo; a vision model reads the card, it's matched to the exact printing (name, collector number, set, language, holo / reverse / 1st edition), and you get TCGplayer market, low, mid and high prices for every printing, a condition estimate from the photo, and the shop's own listings and realized sales of that card if it has any.
+
+```
+GET  /v1/scan?url=https://example.com/my-card.jpg
+POST /v1/scan   {"image": "<base64 or data URL>"}   (or a raw image/* body, max 4 MB)
+```
+
+$0.02 per scan, **charged only when a card is matched**. A blurry photo, a non-card or no confident match returns a 4xx and the payment is never settled. Free demo: `GET /v1/scan/sample`. Same thing as the MCP tool `scan_card`.
+
+Prices come from TCGplayer via [TCGdex](https://tcgdex.dev). The condition estimate is judged from the photo (not a grade) and applies typical TCGplayer condition spreads to the near-mint price; treat it as a guide.
+
 ## Try it free
 
 ```
 GET /v1/sample     → 3 real cards + 1 real sale, full response shapes
 GET /v1/health     → card count, sales count, freshness, network
+GET /v1/scan/sample → one real card scan, full response shape
 ```
 
 Example (`/v1/sample`):
@@ -57,6 +71,7 @@ Example (`/v1/sample`):
 | `GET /v1/movers?n=10` | $0.01 | Biggest 7-day movers, up and down |
 | `GET /v1/sold?q=&n=` | $0.005 | Realized sales: what the shop actually got per card, with the market price at the time |
 | `GET /v1/comp?q=zangoose` | $0.01 | One card comped: live market prices for matching cards next to the shop's realized sales of it |
+| `GET /v1/scan?url=` / `POST /v1/scan` | $0.02 | Photo of any Pokémon card → exact card + TCGplayer prices + condition estimate (only charged on a match) |
 
 Network: Base mainnet (`eip155:8453`). Scheme: `exact`. Asset: USDC.
 Any x402 client works; with the official one:

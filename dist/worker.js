@@ -51817,11 +51817,274 @@ __name(createSettlementFailedResult, "createSettlementFailedResult");
 // src/mcp.ts
 init_server();
 init_bazaar();
+
+// src/scan.ts
+var SCAN_PRICE = "$0.02";
+var MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+var MODELS = ["@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/google/gemma-3-12b-it"];
+var TCGDEX = "https://api.tcgdex.net/v2";
+var COND_FACTOR = { NM: 1, LP: 0.85, MP: 0.7, HP: 0.5, DMG: 0.35 };
+async function imageFromInput(input2) {
+  let bytes;
+  let type = input2.type ?? "image/jpeg";
+  if (input2.bytes) bytes = input2.bytes;
+  else if (input2.base64) {
+    const m = input2.base64.match(/^data:([^;]+);base64,(.*)$/s);
+    if (m) type = m[1];
+    const raw2 = (m ? m[2] : input2.base64).replace(/\s+/g, "");
+    if (raw2.length * 0.75 > MAX_IMAGE_BYTES) return { ok: false, status: 413, error: "image over 4 MB; send a smaller photo" };
+    return { dataUrl: `data:${type};base64,${raw2}` };
+  } else if (input2.url) {
+    let u;
+    try {
+      u = new URL(input2.url);
+    } catch {
+      return { ok: false, status: 400, error: "url is not a valid URL" };
+    }
+    if (!/^https?:$/.test(u.protocol)) return { ok: false, status: 400, error: "url must be http(s)" };
+    const res = await fetch(u.toString(), { headers: { Accept: "image/*" } });
+    if (!res.ok) return { ok: false, status: 422, error: `could not fetch image (${res.status})` };
+    type = (res.headers.get("content-type") ?? type).split(";")[0];
+    if (Number(res.headers.get("content-length") ?? 0) > MAX_IMAGE_BYTES) return { ok: false, status: 413, error: "image over 4 MB" };
+    bytes = await res.arrayBuffer();
+  } else return { ok: false, status: 400, error: "send an image: ?url=, JSON {url} / {image: base64 or data URL}, or a raw image body" };
+  if (!type.startsWith("image/")) return { ok: false, status: 415, error: `not an image (${type})` };
+  if (bytes.byteLength > MAX_IMAGE_BYTES) return { ok: false, status: 413, error: "image over 4 MB" };
+  if (bytes.byteLength < 1e3) return { ok: false, status: 422, error: "image is empty or too small" };
+  return { dataUrl: `data:${type};base64,${toBase64(bytes)}` };
+}
+__name(imageFromInput, "imageFromInput");
+function toBase64(buf) {
+  const b = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode(...b.subarray(i, i + 32768));
+  return btoa(s);
+}
+__name(toBase64, "toBase64");
+var PROMPT = `You are reading a photo of a single Pok\xE9mon trading card for a price lookup.
+Return ONLY a JSON object, no prose, with these keys:
+{"isPokemonCard": boolean,
+ "name": card name exactly as printed at the top (e.g. "Charizard ex", "Zangoose", "Professor's Research"),
+ "number": collector number exactly as printed near the bottom (e.g. "21/106", "082/128", "SWSH050", "TG05/TG30"), or null,
+ "setName": the set name if you can tell from the set symbol, copyright line or layout, or null,
+ "setCode": any printed set code / regulation text near the number (e.g. "PAL", "SV3", "EM"), or null,
+ "language": "en", "ja", "fr", "de", "it", "es", "pt", "ko" or "zh" based on the card text,
+ "foil": "holofoil" if the artwork itself is shiny/holographic, "reverse" if the frame/body is shiny but the art is not, "normal" if nothing is shiny, or null if unsure,
+ "firstEdition": true only if a "1st Edition" stamp is visible,
+ "condition": one of "NM","LP","MP","HP","DMG" judged only from what is visible (whitening, scratches, creases, bends), or null if the photo is too small/blurry,
+ "conditionNotes": short note on visible wear, or null,
+ "confidence": 0 to 1, how sure you are of name AND number}
+If the image is not a Pok\xE9mon card, return {"isPokemonCard": false, "confidence": 0}.`;
+async function readCard(env, dataUrl) {
+  const models = env.SCAN_MODEL ? [env.SCAN_MODEL, ...MODELS.filter((m) => m !== env.SCAN_MODEL)] : MODELS;
+  let lastErr = "";
+  for (const model of models) {
+    try {
+      const out = await env.AI.run(model, {
+        messages: [{ role: "user", content: [{ type: "text", text: PROMPT }, { type: "image_url", image_url: { url: dataUrl } }] }],
+        max_tokens: 400,
+        temperature: 0.1
+      });
+      const txt = typeof out?.response === "string" ? out.response : JSON.stringify(out?.response ?? out);
+      const json2 = parseJson(txt);
+      if (!json2) {
+        lastErr = "vision model returned no JSON";
+        continue;
+      }
+      return { read: normalizeRead(json2), model };
+    } catch (e) {
+      lastErr = String(e?.message ?? e);
+    }
+  }
+  return { ok: false, status: 502, error: `vision model failed: ${lastErr}` };
+}
+__name(readCard, "readCard");
+function parseJson(s) {
+  const m = s.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[0]);
+  } catch {
+    return null;
+  }
+}
+__name(parseJson, "parseJson");
+function normalizeRead(j) {
+  const str = /* @__PURE__ */ __name((v) => typeof v === "string" && v.trim() && v.trim().toLowerCase() !== "null" ? v.trim() : null, "str");
+  const foil = str(j.foil)?.toLowerCase();
+  const cond = str(j.condition)?.toUpperCase();
+  return {
+    isPokemonCard: j.isPokemonCard !== false,
+    name: str(j.name),
+    number: str(j.number),
+    setName: str(j.setName),
+    setCode: str(j.setCode),
+    language: str(j.language)?.toLowerCase().slice(0, 2) ?? null,
+    foil: foil === "holofoil" || foil === "holo" ? "holofoil" : foil === "reverse" || foil === "reverse holofoil" ? "reverse" : foil === "normal" ? "normal" : null,
+    firstEdition: j.firstEdition === true,
+    condition: cond && cond in COND_FACTOR ? cond : null,
+    conditionNotes: str(j.conditionNotes),
+    confidence: Math.max(0, Math.min(1, Number(j.confidence) || 0))
+  };
+}
+__name(normalizeRead, "normalizeRead");
+var TCGDEX_LANGS = /* @__PURE__ */ new Set(["en", "ja", "fr", "de", "it", "es", "pt", "ko", "zh-tw"]);
+function numberParts(n) {
+  if (!n) return { local: null, total: null };
+  const clean = n.replace(/\s+/g, "").replace(/^no\.?/i, "");
+  const m = clean.match(/^([A-Za-z]*\d+[A-Za-z]?)(?:\/([A-Za-z]*)(\d+))?$/);
+  if (!m) return { local: clean, total: null };
+  return { local: m[1], total: m[3] ? Number(m[3]) : null };
+}
+__name(numberParts, "numberParts");
+function normLocal(s) {
+  const m = (s ?? "").toUpperCase().match(/^([A-Z]*)0*(\d+)([A-Z]?)$/);
+  return m ? `${m[1]}${m[2]}${m[3]}` : (s ?? "").toUpperCase();
+}
+__name(normLocal, "normLocal");
+function localVariants(local) {
+  const m = local.match(/^([A-Za-z]*)(\d+)([A-Za-z]?)$/);
+  if (!m) return `eq:${local}`;
+  const [, pre, digits, suf] = m;
+  const n = String(Number(digits));
+  const set2 = /* @__PURE__ */ new Set([local, `${pre}${n}${suf}`, `${pre}${n.padStart(2, "0")}${suf}`, `${pre}${n.padStart(3, "0")}${suf}`]);
+  return `eq:${[...set2].join("|")}`;
+}
+__name(localVariants, "localVariants");
+var words = /* @__PURE__ */ __name((s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => w.length > 1), "words");
+function overlap(a, b) {
+  const A = new Set(words(a)), B = words(b);
+  if (!A.size || !B.length) return 0;
+  return B.filter((w) => A.has(w)).length / Math.max(A.size, B.length);
+}
+__name(overlap, "overlap");
+async function tcgdex(path) {
+  const res = await fetch(`${TCGDEX}${path}`, { cf: { cacheTtl: 3600, cacheEverything: true } });
+  return res.ok ? res.json() : null;
+}
+__name(tcgdex, "tcgdex");
+async function matchCard(read) {
+  const lang = read.language && TCGDEX_LANGS.has(read.language) ? read.language : "en";
+  const { local, total } = numberParts(read.number);
+  const name = (read.name ?? "").replace(/[“”"]/g, "").trim();
+  const q = /* @__PURE__ */ __name((params) => `/${lang}/cards?${new URLSearchParams({ ...params, "pagination:itemsPerPage": "25" })}`, "q");
+  let briefs = [];
+  if (name && local) briefs = await tcgdex(q({ name, localId: localVariants(local) })) ?? [];
+  if (!briefs.length && local) {
+    const first = words(name)[0];
+    if (first) briefs = await tcgdex(q({ name: first, localId: localVariants(local) })) ?? [];
+  }
+  if (!briefs.length && name) {
+    const all = await tcgdex(`/${lang}/cards?${new URLSearchParams({ name, "pagination:itemsPerPage": "250" })}`) ?? [];
+    const sameNo = local ? all.filter((b) => normLocal(b.localId) === normLocal(local)) : [];
+    briefs = sameNo.length ? sameNo : all;
+  }
+  if (!briefs.length) return null;
+  const full = (await Promise.all(briefs.slice(0, 12).map((b) => tcgdex(`/${lang}/cards/${encodeURIComponent(b.id)}`)))).filter(Boolean);
+  const scored = full.map((c) => {
+    let score = 0;
+    if (name) score += 3 * overlap(name, c.name ?? "");
+    if (local && normLocal(c.localId) === normLocal(local)) score += 2;
+    const official = c.set?.cardCount?.official ?? null;
+    if (total && official === total) score += 2.5;
+    else if (total && c.set?.cardCount?.total === total) score += 1.5;
+    if (read.setName && c.set?.name) score += 2 * overlap(read.setName, c.set.name);
+    if (read.firstEdition && c.variants?.firstEdition) score += 0.5;
+    if (c.pricing?.tcgplayer) score += 0.25;
+    return { c, score: +score.toFixed(2) };
+  }).sort((a, b) => b.score - a.score);
+  return { lang, scored };
+}
+__name(matchCard, "matchCard");
+var num = /* @__PURE__ */ __name((v) => typeof v === "number" && isFinite(v) ? v : null, "num");
+function pickPrinting(tp, read) {
+  const keys = Object.keys(tp).filter((k) => tp[k] && typeof tp[k] === "object");
+  const has = /* @__PURE__ */ __name((k) => keys.includes(k), "has");
+  const order2 = [];
+  if (read.firstEdition) order2.push(read.foil === "holofoil" ? "1st-edition-holofoil" : "1st-edition", "1st-edition-holofoil");
+  if (read.foil === "reverse") order2.push("reverse-holofoil", "reverse");
+  if (read.foil === "holofoil") order2.push("holofoil", "unlimited-holofoil");
+  if (read.foil === "normal") order2.push("normal", "unlimited");
+  order2.push("normal", "holofoil", "unlimited", "unlimited-holofoil", "reverse-holofoil", "reverse");
+  return order2.find(has) ?? keys[0] ?? null;
+}
+__name(pickPrinting, "pickPrinting");
+async function scanCard(env, dataUrl) {
+  const r = await readCard(env, dataUrl);
+  if ("ok" in r) return r;
+  const { read, model } = r;
+  if (!read.isPokemonCard) return { ok: false, status: 422, error: "no Pok\xE9mon card found in the photo", read };
+  if (!read.name && !read.number) return { ok: false, status: 422, error: "could not read the card name or number; try a sharper, closer photo", read };
+  const m = await matchCard(read);
+  const best = m?.scored[0];
+  if (!m || !best || best.score < 2) return { ok: false, status: 422, error: "card read but no confident match in the card database", read };
+  const c = best.c;
+  const tp = c.pricing?.tcgplayer ?? {};
+  const printing = pickPrinting(tp, read);
+  const p = printing ? tp[printing] : null;
+  const nm = p ? { market: num(p.marketPrice), low: num(p.lowPrice), mid: num(p.midPrice), high: num(p.highPrice) } : null;
+  const cond = read.condition;
+  const allPrintings = {};
+  for (const [k, v] of Object.entries(tp)) if (v && typeof v === "object") allPrintings[k] = { market: num(v.marketPrice), low: num(v.lowPrice) };
+  return {
+    ok: true,
+    read,
+    match: {
+      id: c.id,
+      name: c.name,
+      number: `${c.localId}${c.set?.cardCount?.official ? `/${c.set.cardCount.official}` : ""}`,
+      set: c.set?.name ?? "",
+      setId: c.set?.id ?? "",
+      setTotal: c.set?.cardCount?.official ?? null,
+      rarity: c.rarity ?? null,
+      image: c.image ? `${c.image}/high.webp` : null,
+      language: m.lang,
+      score: best.score
+    },
+    alternatives: m.scored.slice(1, 4).map(({ c: a, score }) => ({ id: a.id, name: a.name, number: a.localId, set: a.set?.name ?? "", score })),
+    prices: {
+      source: "TCGplayer via TCGdex",
+      currency: "USD",
+      updated: tp.updated ? String(tp.updated) : null,
+      printing,
+      nearMint: nm,
+      conditionEstimate: cond && nm?.market != null ? {
+        condition: cond,
+        market: +(nm.market * COND_FACTOR[cond]).toFixed(2),
+        note: "Estimate: condition judged from the photo (not a grade) and applied with typical TCGplayer condition spreads to the near-mint market price."
+      } : null,
+      allPrintings
+    },
+    model
+  };
+}
+__name(scanCard, "scanCard");
+function shopMatches(rows, res) {
+  const local = normLocal(numberParts(res.match.number).local);
+  const nameWords = words(res.match.name);
+  return rows.filter((x) => {
+    const xn = normLocal(numberParts(x.number ?? "").local);
+    const named = nameWords.length > 0 && nameWords.every((w) => words(x.name).includes(w));
+    return named && (!local || !xn || xn === local);
+  }).slice(0, 10);
+}
+__name(shopMatches, "shopMatches");
+var exampleScan = {
+  ok: true,
+  read: { isPokemonCard: true, name: "Zangoose", number: "21/106", setName: "EX Emerald", setCode: null, language: "en", foil: "reverse", firstEdition: false, condition: "NM", conditionNotes: "clean corners, no visible whitening", confidence: 0.9 },
+  match: { id: "ex9-21", name: "Zangoose", number: "21/106", set: "Emerald", setId: "ex9", setTotal: 106, rarity: "Rare", image: "https://assets.tcgdex.net/en/ex/ex9/21/high.webp", language: "en", score: 9.75 },
+  alternatives: [],
+  prices: { source: "TCGplayer via TCGdex", currency: "USD", updated: "2026-11-12T00:00:00Z", printing: "reverse-holofoil", nearMint: { market: 47.75, low: 40, mid: 50, high: 70 }, conditionEstimate: { condition: "NM", market: 47.75, note: "Estimate: ..." }, allPrintings: { normal: { market: 9.1, low: 6 }, "reverse-holofoil": { market: 47.75, low: 40 } } },
+  shop: { listed: [], sold: [] },
+  model: "@cf/meta/llama-4-scout-17b-16e-instruct"
+};
+
+// src/mcp.ts
 var DEFAULT_DATA_URL = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/data.json";
 var DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/prices/latest.json";
 var DEFAULT_SALES_URL = "https://raw.githubusercontent.com/lazylucariospokemart/lazy-lucario-vault/main/sales.json";
 var DEFAULT_MCP_URL = "https://foil-ledger-api.lazylucariospokemart28.workers.dev/mcp";
-var MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01", get_sold_prices: "$0.005", comp_card: "$0.01" };
+var MCP_PRICES = { get_all_cards: "$0.005", get_card_price: "$0.002", search_cards: "$0.005", get_movers: "$0.01", get_sold_prices: "$0.005", comp_card: "$0.01", scan_card: SCAN_PRICE };
 var cache2 = null;
 var TTL_MS = 60 * 60 * 1e3;
 async function loadCards(env) {
@@ -52064,6 +52327,26 @@ async function buildServer(env) {
       return text({ q: needle, asOf: updatedAt, note: SALES_NOTE, listed, sold, summary });
     })
   );
+  const paidScan = await paidTool(
+    "scan_card",
+    `Scan any Pok\xE9mon TCG card from a photo: identifies the exact card (name, collector number, set, printing, language) and returns TCGplayer market/low/mid/high prices per printing, a condition estimate from the photo, and this shop's own listings and realized sales of it. Charged only when a card is matched. Costs ${MCP_PRICES.scan_card} USDC.`,
+    { properties: { image_url: { type: "string", description: "Public URL of a card photo (jpg/png/webp, max 4 MB)" }, image_base64: { type: "string", description: "Or the photo as base64 / a data URL" } }, required: [] },
+    { image_url: "https://assets.tcgdex.net/en/ex/ex9/21/high.png" },
+    exampleScan
+  );
+  server.tool(
+    "scan_card",
+    `Photo of a Pok\xE9mon card -> exact card + prices. Costs ${MCP_PRICES.scan_card}, only on a match.`,
+    { image_url: external_exports.string().optional(), image_base64: external_exports.string().optional() },
+    paidScan(async ({ image_url, image_base64 }) => {
+      const img = await imageFromInput({ url: image_url, base64: image_base64 });
+      if ("ok" in img) return { ...text({ error: img.error }), isError: true };
+      const res = await scanCard(env, img.dataUrl);
+      if (!res.ok) return { ...text({ error: res.error, read: res.read }), isError: true };
+      const [cards, { sales }] = await Promise.all([loadCards(env).catch(() => []), loadSales(env).catch(() => ({ sales: [] }))]);
+      return text({ ...res, shop: { listed: shopMatches(cards, res), sold: shopMatches(sales, res), note: "This shop's own listings and realized sales of the matched card, if any." } });
+    })
+  );
   return server;
 }
 __name(buildServer, "buildServer");
@@ -52077,9 +52360,9 @@ __name(handleMcp, "handleMcp");
 
 // src/discovery.ts
 var USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-var UPDATED = "2026-11-06T07:40:00Z";
+var UPDATED = "2026-11-12T23:59:00Z";
 var NAME = "Foil Ledger API";
-var DESC = "Condition-aware Pok\xE9mon TCG market prices (TCGplayer-based, refreshed daily) plus realized sales from a working card shop. Pay per call with USDC on Base via x402; also available as paid MCP tools at /mcp.";
+var DESC = "Condition-aware Pok\xE9mon TCG market prices (TCGplayer-based, refreshed daily), realized sales from a working card shop, and card scanning: send a photo of any Pok\xE9mon card, get the exact card and its TCGplayer prices. Pay per call with USDC on Base via x402; also available as paid MCP tools at /mcp.";
 var REPO = "https://github.com/lazylucariospokemart/foil-ledger-api";
 function netName(n) {
   return n === "eip155:8453" ? "base" : n === "eip155:84532" ? "base-sepolia" : n;
@@ -52258,8 +52541,10 @@ var PRICES = {
   // top 7-day movers
   sold: "$0.005",
   // realized sales (what the shop actually got)
-  comp: "$0.01"
+  comp: "$0.01",
   // one card: market price next to realized sales
+  scan: SCAN_PRICE
+  // photo of any Pokémon card -> identified card + TCGplayer prices (only charged on a match)
 };
 var cache3 = null;
 var TTL_MS2 = 60 * 60 * 1e3;
@@ -52317,11 +52602,13 @@ var PAID_ROUTES = [
   { method: "GET", path: "/v1/search", price: PRICES.search, desc: "Search by card name / set", query: { q: "Card name or set text" } },
   { method: "GET", path: "/v1/movers", price: PRICES.movers, desc: "Biggest 7-day movers, up and down", query: { n: "How many each way (max 50)" } },
   { method: "GET", path: "/v1/sold", price: PRICES.sold, desc: "Realized sales: what this shop actually got per card, with the market price at the time", query: { q: "Filter by name/set/number", n: "Max results (max 500)" } },
+  { method: "GET", path: "/v1/scan", price: PRICES.scan, desc: "Scan any Pok\xE9mon card from a photo: identifies the exact card (name, number, set, printing) and returns TCGplayer prices plus a condition estimate. Also POST /v1/scan with a JSON {image} (base64/data URL) or a raw image body. Charged only when a card is matched", query: { url: "Public URL of a card photo (jpg/png/webp, max 4 MB)" } },
   { method: "GET", path: "/v1/comp", price: PRICES.comp, desc: "Comp one card: live market price for matching cards next to this shop's realized sales", query: { q: "Card name, set or number text" } }
 ];
 var FREE_ROUTES = [
   { method: "GET", path: "/", price: "free", desc: "Landing: endpoints, prices, MCP, referral terms" },
   { method: "GET", path: "/v1/sample", price: "free", desc: "Three real cards and one real sale so you can see the response shapes" },
+  { method: "GET", path: "/v1/scan/sample", price: "free", desc: "One real card scan of a fixed public image, so you can see the /v1/scan response before paying" },
   { method: "GET", path: "/v1/health", price: "free", desc: "Freshness + card count" },
   { method: "GET", path: "/v1/stats", price: "free", desc: "Calls and USDC earned today / last 7 days (no addresses)" },
   { method: "GET", path: "/v1/referrals/:address", price: "free", desc: "Referral earnings for a wallet", pathParam: "address" }
@@ -52338,6 +52625,9 @@ app.get("/", (c) => c.json({
     "GET /v1/movers?n=10": { price: PRICES.movers, desc: "Biggest 7-day movers, up and down" },
     "GET /v1/sold?q=&n=": { price: PRICES.sold, desc: "Realized sales: what this shop actually got per card, with the market price at the time (q filters by name/set/number)" },
     "GET /v1/comp?q=": { price: PRICES.comp, desc: "Comp one card: live market price for matching cards next to this shop's realized sales of them" },
+    "GET /v1/scan?url=": { price: PRICES.scan, desc: "Photo of ANY Pok\xE9mon card -> exact card match + TCGplayer prices per printing + condition estimate (+ this shop's listings/sales of it). Charged only on a match" },
+    "POST /v1/scan": { price: PRICES.scan, desc: 'Same, uploading the photo: JSON {"image": "<base64 or data URL>"} or {"url"}, or a raw image/* body (max 4 MB)' },
+    "GET /v1/scan/sample": { price: "free", desc: "One real scan of a fixed public card image (see the scan response shape)" },
     "GET /v1/sample": { price: "free", desc: "Three real cards and one real sale so you can see the response shapes" },
     "GET /v1/health": { price: "free", desc: "Freshness + card count" },
     "GET /v1/stats": { price: "free", desc: "Calls and USDC earned today / last 7 days (no addresses)" },
@@ -52350,6 +52640,19 @@ app.get("/", (c) => c.json({
   discovery: { openapi: new URL("/openapi.json", c.req.url).toString(), llms: new URL("/llms.txt", c.req.url).toString(), x402: new URL("/.well-known/x402", c.req.url).toString(), agent: new URL("/.well-known/agent.json", c.req.url).toString() },
   owner: "Lazy Lucario \u2014 lazylucariospokemart.github.io/lazy-lucario-vault"
 }));
+var SAMPLE_SCAN_URL = "https://assets.tcgdex.net/en/ex/ex9/21/high.png";
+app.get("/v1/scan/sample", async (c) => {
+  const key = `scan-sample:${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`;
+  const hit = await c.env.LEDGER.get(key);
+  if (hit && !c.req.query("fresh")) return c.json({ ...JSON.parse(hit), cached: true });
+  const img = await imageFromInput({ url: SAMPLE_SCAN_URL });
+  if ("ok" in img) return c.json({ error: img.error }, img.status);
+  const res = await scanCard(c.env, img.dataUrl);
+  if (!res.ok) return c.json({ sample: SAMPLE_SCAN_URL, error: res.error, read: res.read }, 502);
+  const out = { note: `Free sample scan of ${SAMPLE_SCAN_URL}. Scan your own photo with GET /v1/scan?url= or POST /v1/scan (${PRICES.scan}, charged only on a match).`, ...await withShop(c.env, res) };
+  await c.env.LEDGER.put(key, JSON.stringify(out), { expirationTtl: 60 * 60 * 26 });
+  return c.json(out);
+});
 app.get("/v1/health", async (c) => {
   const cards = await loadCards2(c.env);
   const newest = cards.map((x) => x.priceAt ?? "").sort().pop();
@@ -52476,7 +52779,32 @@ app.use("*", async (c, next) => {
     market: { price: 47.75, chg7: 0, at: "2026-11-01T20:55:08Z" },
     loggedAt: "2026-11-05T21:34:24Z"
   };
+  const scanDesc = "Scan any Pok\xE9mon TCG card from a photo: a vision model reads it, it is matched to the exact card (name, collector number, set, printing, language), and you get TCGplayer market/low/mid/high prices per printing plus a condition estimate from the photo, and the shop's own listings and realized sales of that card. Charged only when a card is matched";
+  const scanOut = { example: exampleScan };
   const routes = {
+    "GET /v1/scan": {
+      accepts: accept(PRICES.scan),
+      mimeType: "application/json",
+      description: scanDesc,
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: { url: "https://assets.tcgdex.net/en/ex/ex9/21/high.png" },
+        inputSchema: { properties: { url: { type: "string", description: "Public URL of a photo of one Pok\xE9mon card (jpg/png/webp, max 4 MB)" } }, required: ["url"] },
+        output: scanOut
+      }) }
+    },
+    "POST /v1/scan": {
+      accepts: accept(PRICES.scan),
+      mimeType: "application/json",
+      description: scanDesc,
+      ...service,
+      extensions: { ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: { image: "data:image/jpeg;base64,/9j/4AAQ..." },
+        inputSchema: { properties: { image: { type: "string", description: "Card photo as base64 or a data URL (max 4 MB)" }, url: { type: "string", description: "Or a public image URL" } }, required: [] },
+        output: scanOut
+      }) }
+    },
     "GET /v1/sold": {
       accepts: accept(PRICES.sold),
       mimeType: "application/json",
@@ -52596,6 +52924,33 @@ app.get("/v1/comp", async (c) => {
   };
   return c.json({ q, asOf: updatedAt, note: SALES_NOTE2, listed, sold, summary });
 });
+async function finishScan(c, img) {
+  if ("ok" in img) return c.json({ error: img.error }, img.status);
+  const res = await scanCard(c.env, img.dataUrl);
+  if (!res.ok) return c.json({ error: res.error, read: res.read }, res.status);
+  return c.json(await withShop(c.env, res));
+}
+__name(finishScan, "finishScan");
+async function withShop(env, res) {
+  const [cards, { sales }] = await Promise.all([loadCards2(env).catch(() => []), loadSales2(env).catch(() => ({ sales: [] }))]);
+  return { ...res, shop: { listed: shopMatches(cards, res).map(pub), sold: shopMatches(sales, res), note: "This shop's own listings and realized sales of the matched card, if any." } };
+}
+__name(withShop, "withShop");
+app.get("/v1/scan", async (c) => {
+  const url2 = c.req.query("url");
+  return finishScan(c, await imageFromInput({ url: url2 }));
+});
+app.post("/v1/scan", async (c) => {
+  const type = (c.req.header("content-type") ?? "").split(";")[0].trim();
+  if (type.startsWith("image/")) return finishScan(c, await imageFromInput({ bytes: await c.req.arrayBuffer(), type }));
+  let body = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "send JSON {image} / {url} or a raw image/* body" }, 400);
+  }
+  return finishScan(c, await imageFromInput({ base64: body.image ?? body.base64, url: body.url }));
+});
 var index_default = app;
 export {
   index_default as default
@@ -52609,4 +52964,4 @@ content-type/index.js:
    * MIT Licensed
    *)
 */
-
+//# sourceMappingURL=index.js.map

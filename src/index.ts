@@ -17,9 +17,12 @@ import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { handleMcp, MCP_PRICES } from "./mcp";
 import { discoveryApp, type RouteInfo } from "./discovery";
+import { scanCard, imageFromInput, shopMatches, exampleScan, SCAN_PRICE, type ScanResult } from "./scan";
 
 type Env = {
   LEDGER: KVNamespace;          // referral + call ledger
+  AI: Ai;                       // Workers AI (card scan vision model)
+  SCAN_MODEL?: string;          // optional override of the vision model id
   PAY_TO: string;               // Lazy's USDC receiving address (public address only)
   NETWORK?: string;             // "eip155:84532" (Base Sepolia, default) or "eip155:8453" (Base mainnet)
   FACILITATOR_URL?: string;     // testnet default https://x402.org/facilitator ; mainnet https://api.cdp.coinbase.com/platform/v2/x402
@@ -44,6 +47,7 @@ const PRICES = {
   movers: "$0.01",    // top 7-day movers
   sold:   "$0.005",   // realized sales (what the shop actually got)
   comp:   "$0.01",    // one card: market price next to realized sales
+  scan:   SCAN_PRICE, // photo of any Pokémon card -> identified card + TCGplayer prices (only charged on a match)
 };
 
 type Card = {
@@ -120,11 +124,13 @@ const PAID_ROUTES: RouteInfo[] = [
   { method: "GET", path: "/v1/search",    price: PRICES.search, desc: "Search by card name / set", query: { q: "Card name or set text" } },
   { method: "GET", path: "/v1/movers",    price: PRICES.movers, desc: "Biggest 7-day movers, up and down", query: { n: "How many each way (max 50)" } },
   { method: "GET", path: "/v1/sold",      price: PRICES.sold,   desc: "Realized sales: what this shop actually got per card, with the market price at the time", query: { q: "Filter by name/set/number", n: "Max results (max 500)" } },
+  { method: "GET", path: "/v1/scan",      price: PRICES.scan,   desc: "Scan any Pokémon card from a photo: identifies the exact card (name, number, set, printing) and returns TCGplayer prices plus a condition estimate. Also POST /v1/scan with a JSON {image} (base64/data URL) or a raw image body. Charged only when a card is matched", query: { url: "Public URL of a card photo (jpg/png/webp, max 4 MB)" } },
   { method: "GET", path: "/v1/comp",      price: PRICES.comp,   desc: "Comp one card: live market price for matching cards next to this shop's realized sales", query: { q: "Card name, set or number text" } },
 ];
 const FREE_ROUTES: RouteInfo[] = [
   { method: "GET", path: "/",             price: "free", desc: "Landing: endpoints, prices, MCP, referral terms" },
   { method: "GET", path: "/v1/sample",    price: "free", desc: "Three real cards and one real sale so you can see the response shapes" },
+  { method: "GET", path: "/v1/scan/sample", price: "free", desc: "One real card scan of a fixed public image, so you can see the /v1/scan response before paying" },
   { method: "GET", path: "/v1/health",    price: "free", desc: "Freshness + card count" },
   { method: "GET", path: "/v1/stats",     price: "free", desc: "Calls and USDC earned today / last 7 days (no addresses)" },
   { method: "GET", path: "/v1/referrals/:address", price: "free", desc: "Referral earnings for a wallet", pathParam: "address" },
@@ -143,6 +149,9 @@ app.get("/", (c) => c.json({
     "GET /v1/movers?n=10":  { price: PRICES.movers, desc: "Biggest 7-day movers, up and down" },
     "GET /v1/sold?q=&n=":   { price: PRICES.sold,   desc: "Realized sales: what this shop actually got per card, with the market price at the time (q filters by name/set/number)" },
     "GET /v1/comp?q=":      { price: PRICES.comp,   desc: "Comp one card: live market price for matching cards next to this shop's realized sales of them" },
+    "GET /v1/scan?url=":    { price: PRICES.scan,   desc: "Photo of ANY Pokémon card -> exact card match + TCGplayer prices per printing + condition estimate (+ this shop's listings/sales of it). Charged only on a match" },
+    "POST /v1/scan":        { price: PRICES.scan,   desc: "Same, uploading the photo: JSON {\"image\": \"<base64 or data URL>\"} or {\"url\"}, or a raw image/* body (max 4 MB)" },
+    "GET /v1/scan/sample":  { price: "free",        desc: "One real scan of a fixed public card image (see the scan response shape)" },
     "GET /v1/sample":       { price: "free",        desc: "Three real cards and one real sale so you can see the response shapes" },
     "GET /v1/health":       { price: "free",        desc: "Freshness + card count" },
     "GET /v1/stats":        { price: "free",        desc: "Calls and USDC earned today / last 7 days (no addresses)" },
@@ -155,6 +164,21 @@ app.get("/", (c) => c.json({
   discovery: { openapi: new URL("/openapi.json", c.req.url).toString(), llms: new URL("/llms.txt", c.req.url).toString(), x402: new URL("/.well-known/x402", c.req.url).toString(), agent: new URL("/.well-known/agent.json", c.req.url).toString() },
   owner: "Lazy Lucario — lazylucariospokemart.github.io/lazy-lucario-vault",
 }));
+
+// Free: one real scan of a fixed public card image so buyers (and Lazy) can see it work. Cached a day.
+const SAMPLE_SCAN_URL = "https://assets.tcgdex.net/en/ex/ex9/21/high.png";
+app.get("/v1/scan/sample", async (c) => {
+  const key = `scan-sample:${new Date().toISOString().slice(0, 10)}`;
+  const hit = await c.env.LEDGER.get(key);
+  if (hit && !c.req.query("fresh")) return c.json({ ...JSON.parse(hit), cached: true });
+  const img = await imageFromInput({ url: SAMPLE_SCAN_URL });
+  if ("ok" in img) return c.json({ error: img.error }, img.status);
+  const res = await scanCard(c.env, img.dataUrl);
+  if (!res.ok) return c.json({ sample: SAMPLE_SCAN_URL, error: res.error, read: res.read }, 502);
+  const out = { note: `Free sample scan of ${SAMPLE_SCAN_URL}. Scan your own photo with GET /v1/scan?url= or POST /v1/scan (${PRICES.scan}, charged only on a match).`, ...(await withShop(c.env, res)) };
+  await c.env.LEDGER.put(key, JSON.stringify(out), { expirationTtl: 60 * 60 * 26 });
+  return c.json(out);
+});
 
 app.get("/v1/health", async (c) => {
   const cards = await loadCards(c.env);
@@ -263,7 +287,26 @@ app.use("*", async (c, next) => {
     rarity: "Rare", language: "English", tcgId: "90703", soldPrice: 47.75, priceBasis: "market", soldAt: "2026-10-24T06:30:54Z",
     channel: "vault", market: { price: 47.75, chg7: 0, at: "2026-11-01T20:55:08Z" }, loggedAt: "2026-11-05T21:34:24Z",
   };
+  const scanDesc = "Scan any Pokémon TCG card from a photo: a vision model reads it, it is matched to the exact card (name, collector number, set, printing, language), and you get TCGplayer market/low/mid/high prices per printing plus a condition estimate from the photo, and the shop's own listings and realized sales of that card. Charged only when a card is matched";
+  const scanOut = { example: exampleScan };
   const routes: RoutesConfig = {
+    "GET /v1/scan": {
+      accepts: accept(PRICES.scan), mimeType: "application/json", description: scanDesc, ...service,
+      extensions: { ...declareDiscoveryExtension({
+        input: { url: "https://assets.tcgdex.net/en/ex/ex9/21/high.png" },
+        inputSchema: { properties: { url: { type: "string", description: "Public URL of a photo of one Pokémon card (jpg/png/webp, max 4 MB)" } }, required: ["url"] },
+        output: scanOut,
+      }) },
+    },
+    "POST /v1/scan": {
+      accepts: accept(PRICES.scan), mimeType: "application/json", description: scanDesc, ...service,
+      extensions: { ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: { image: "data:image/jpeg;base64,/9j/4AAQ..." },
+        inputSchema: { properties: { image: { type: "string", description: "Card photo as base64 or a data URL (max 4 MB)" }, url: { type: "string", description: "Or a public image URL" } }, required: [] },
+        output: scanOut,
+      }) },
+    },
     "GET /v1/sold": {
       accepts: accept(PRICES.sold), mimeType: "application/json",
       description: "Realized Pokémon TCG sales from a live card shop: the price actually received per card (with condition, printing, basis and channel) next to the market price at the time. Ground truth, not an aggregate. Optional q filters by name/set/number, n caps results",
@@ -379,6 +422,29 @@ app.get("/v1/comp", async (c) => {
     avgSoldVsMarketPct: ratios.length ? +(ratios.reduce((a, b) => a + b, 0) / ratios.length).toFixed(1) : null,
   };
   return c.json({ q, asOf: updatedAt, note: SALES_NOTE, listed, sold, summary });
+});
+
+// ---------- card scan ----------
+async function finishScan(c: any, img: Awaited<ReturnType<typeof imageFromInput>>) {
+  if ("ok" in img) return c.json({ error: img.error }, img.status);
+  const res = await scanCard(c.env, img.dataUrl);
+  if (!res.ok) return c.json({ error: res.error, read: res.read }, res.status); // 4xx/5xx → x402 cancels: no charge
+  return c.json(await withShop(c.env, res));
+}
+async function withShop(env: Env, res: ScanResult) {
+  const [cards, { sales }] = await Promise.all([loadCards(env).catch(() => [] as Card[]), loadSales(env).catch(() => ({ sales: [] as Sale[] }))]);
+  return { ...res, shop: { listed: shopMatches(cards, res).map(pub), sold: shopMatches(sales, res), note: "This shop's own listings and realized sales of the matched card, if any." } };
+}
+app.get("/v1/scan", async (c) => {
+  const url = c.req.query("url");
+  return finishScan(c, await imageFromInput({ url }));
+});
+app.post("/v1/scan", async (c) => {
+  const type = (c.req.header("content-type") ?? "").split(";")[0].trim();
+  if (type.startsWith("image/")) return finishScan(c, await imageFromInput({ bytes: await c.req.arrayBuffer(), type }));
+  let body: any = {};
+  try { body = await c.req.json(); } catch { return c.json({ error: "send JSON {image} / {url} or a raw image/* body" }, 400); }
+  return finishScan(c, await imageFromInput({ base64: body.image ?? body.base64, url: body.url }));
 });
 
 export default app;
